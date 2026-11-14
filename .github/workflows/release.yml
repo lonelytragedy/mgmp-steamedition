@@ -1,0 +1,130 @@
+name: Build and release
+
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GAME_VERSION: '1.1.21239'
+  GAME_SHA256: '4127cd6a792ae528bca6f65a8873dd61789591937d87656c2b586a5e30eb77ea'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = '${{ github.ref_name }}'
+          if ('${{ github.ref_type }}' -eq 'tag' -and $ref -match '^v(\d+\.\d+\.\d+)') {
+            $v = $Matches[1]
+          } else {
+            $v = '0.0.0'
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "Building version $v"
+
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DMGMP_VERSION=${{ steps.ver.outputs.version }}
+
+      - name: Build
+        run: cmake --build build --config Release -- -m
+
+      - name: Test
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $v   = '${{ steps.ver.outputs.version }}'
+          $out = 'dist'
+          New-Item -ItemType Directory -Force $out | Out-Null
+
+          $steam = Join-Path $out "mgmp-steamedition-$v"
+          New-Item -ItemType Directory -Force $steam | Out-Null
+          Copy-Item build\Release\version.dll, LICENSE $steam
+          @"
+          mgmp Steam Edition $v
+          For Mewgenics $env:GAME_VERSION (Steam, Windows 64-bit).
+
+          INSTALL (both players)
+            1. Steam -> Mewgenics -> Manage -> Browse local files.
+            2. Copy version.dll next to Mewgenics.exe.
+            3. Start the game from Steam. A "Multiplayer" button appears in the top-right corner.
+
+          PLAY
+            Host:    Multiplayer -> Host over Steam -> Invite a friend,
+                     then main menu -> Play -> click your save slot.
+            Partner: stay on the main menu, accept the invite (or Multiplayer -> Join).
+
+          UNINSTALL
+            Delete version.dll.
+
+          Logs: mgmp_trace.log and mgmp_trace.prev.log in the game folder.
+          Source: https://github.com/${{ github.repository }}
+          "@ | Set-Content (Join-Path $steam 'INSTALL.txt') -Encoding utf8
+          Compress-Archive -Path "$steam\*" -DestinationPath "$out\mgmp-steamedition-$v.zip" -Force
+
+          $loader = Join-Path $out "mgmp-loader-$v"
+          New-Item -ItemType Directory -Force $loader | Out-Null
+          Copy-Item build\Release\mgmp.dll, build\Release\mgmp_loader.exe, mgmp.json.template, LICENSE $loader
+          Rename-Item (Join-Path $loader 'mgmp.json.template') 'mgmp.json'
+          Compress-Archive -Path "$loader\*" -DestinationPath "$out\mgmp-loader-$v.zip" -Force
+
+          Copy-Item build\Release\version.dll "$out\version.dll"
+          Get-ChildItem $out -File | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content "$out\SHA256SUMS.txt" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mgmp-steamedition-${{ steps.ver.outputs.version }}
+          path: dist/*.*
+
+      - name: Release notes
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          @"
+          **Game version:** Mewgenics ``$env:GAME_VERSION`` (Steam, Windows 64-bit)
+          ``Mewgenics.exe`` SHA256: ``$env:GAME_SHA256``
+
+          Both players need the same game version and the same mod version.
+
+          ### Install
+          1. Steam -> Mewgenics -> **Manage -> Browse local files**.
+          2. Copy **``version.dll``** next to ``Mewgenics.exe``.
+          3. Start the game from Steam. A **Multiplayer** button appears in the top-right corner.
+
+          ### Files
+          | file | what it is |
+          |---|---|
+          | ``version.dll`` | the Steam Edition, drop-in |
+          | ``mgmp-steamedition-$v.zip`` | ``version.dll`` + install notes |
+          | ``mgmp-loader-$v.zip`` | the original loader route (direct TCP) |
+          | ``SHA256SUMS.txt`` | checksums |
+
+          See the [README](https://github.com/${{ github.repository }}#readme) for how to play and the known limits.
+          "@ | Set-Content release-notes.md -Encoding utf8
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: mgmp Steam Edition ${{ steps.ver.outputs.version }} (Mewgenics ${{ env.GAME_VERSION }})
+          body_path: release-notes.md
+          files: |
+            dist/version.dll
+            dist/mgmp-steamedition-${{ steps.ver.outputs.version }}.zip
+            dist/mgmp-loader-${{ steps.ver.outputs.version }}.zip
+            dist/SHA256SUMS.txt

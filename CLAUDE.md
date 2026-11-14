@@ -14,7 +14,7 @@ battle / shop / event / level-up → repeat.
 | layer | serializable? | deterministic? | so sync by |
 |---|---|---|---|
 | **meta** (map, shop, level-up, inventory) | **yes** — `SerializeCatData`, the `Inventory` serializer, `SQLSaveFile` | no | **host-authoritative state sync** |
-| **battle** | no — there is no `Character`/`Status`/`TacticsGrid` serializer | **yes** — measured byte-identical under 5.4x timing variation | **deterministic lockstep over TCP** |
+| **battle** | no — there is no `Character`/`Status`/`TacticsGrid` serializer | **yes** — measured byte-identical under 5.4x timing variation | **deterministic lockstep over TCP or Steam P2P** |
 
 Each layer supports exactly one of the two, and it is not the same one. The
 meta layer never has to be made deterministic, because only the host rolls it.
@@ -64,11 +64,15 @@ exists to catch — and the fence caught nothing across 6327 suppressor calls an
    new one; the prediction held. The **three SDL_DYNAPI slots are still
    hardcoded** — they were hand-migrated, and the third mechanism that would
    resolve them is still unwritten.
-7. **Reach, not correctness:** transport is direct-IP only, so a real session
-   needs port forwarding at one end — `SteamNetworkingMessages002` is linked and
-   unused, and there is no lobby API to move to. And **3–4 players has never been
-   run**: the peer envelope, `PEERS` and the control split are all written for it,
-   but written is not measured.
+7. ~~**Reach, not correctness:** transport is direct-IP only.~~ **Done in the
+   Steam Edition** — Steam lobbies + `ISteamNetworkingMessages` through the
+   game's own `steam_api64.dll`, and a drop-in `version.dll`; see "Steam Edition"
+   below. Played end to end over Steam on 2026-11-14 (area 1 including the boss,
+   31 turns agreeing). **3–4 players has still never been run**: the peer
+   envelope, `PEERS` and the control split are all written for it, but written is
+   not measured.
+8. **The house is not replicated** and the partner cannot change equipment —
+   both by design for now; see "Steam Edition" for what happens at a home visit.
 
 ### The post-battle gap — the window no hash covers
 
@@ -134,7 +138,14 @@ directions — framing-level counting, not lost data.
 - Links `steam_api64.dll`: `SteamNetworkingSockets012`,
   `SteamNetworkingMessages002`, `SteamNetworkingUtils004`, `SteamNetworking006`,
   `SteamUser023`, `SteamFriends018`, `SteamUtils010`, `SteamInput006`.
-  **No `SteamMatchmaking`** (no lobby API linked).
+  The **exe** never asks for `SteamMatchmaking` — but that only says what the
+  game uses. The shipped **`steam_api64.dll`** exports the whole flat API
+  (1096 exports), including `SteamAPI_SteamMatchmaking_v009` and every
+  `SteamAPI_ISteamMatchmaking_*` method, so a lobby API *is* available to anything
+  running in the process. The exe imports only `SteamInternal_*`,
+  `SteamAPI_RestartAppIfNecessary`, `SteamAPI_RunCallbacks`,
+  `SteamAPI_GetHSteamUser` and `SteamAPI_Shutdown` — **not** the manual-dispatch
+  API, so registered callbacks are delivered by the game's own `RunCallbacks`.
 - **`resources.gpak` (~5 GB) is NOT loaded into RAM at startup** — verified.
   `initSystems` @ `0x1409A7D53` calls `GPak::LoadIndex` @ `0x140A434D0`, which
   opens the file as a plain `std::ifstream(in|binary)` (`GPak::OpenStream` @
@@ -1749,9 +1760,9 @@ subclass, and `imgui_impl_opengl3` carries its own GL loader.
 ## Mod architecture
 
 ```
-L0  Loader          proxy DLL or injector; MinHook inline hooks at resolved RVAs
+L0  Loader          version.dll proxy or injector; MinHook inline hooks at resolved RVAs
 L1  Determinism     RNG stream control + the fences
-L2  Transport       TCP, length-prefixed frames, behind an interface
+L2  Transport       TCP (length-prefixed frames) or Steam P2P, behind one interface
 L3  Scheduler       command queue, turn barrier, hash exchange
 L4  Session         host/join, run state push, seed agreement
 L5  Diagnostics     desync detect -> halt + dump
@@ -2403,11 +2414,11 @@ the same lesson again.
 | 26 | `STATEDUMP` |
 | **27** | `SAVEFILE` carries `fresh` — a slot click vs a catch-up copy. **The two sends were byte-identical, hash included**, so no comparison on the receiving side could have separated them. Also `HOSTLEFT`, the same story from the other end: `fresh` covers the host STARTING a run, `HOSTLEFT` covers it ENDING one. They share a number only because neither has shipped |
 
-TCP is deliberate: head-of-line blocking is irrelevant when turn-based (you are
-blocking on that message anyway), and a turn is a few hundred bytes you want
-reliable and ordered. Cost is losing NAT punch/relay. Keep transport behind an
-interface. `SteamNetworkingMessages002` is linked for a future move; there is no
-lobby API, so direct-IP stays.
+A reliable, ordered transport is deliberate: head-of-line blocking is irrelevant
+when turn-based (you are blocking on that message anyway), and a turn is a few
+hundred bytes you want reliable and ordered. TCP was the first; the Steam Edition
+adds Steam P2P behind the same `net_*` interface, which gives back NAT traversal
+and relay. See "Steam Edition".
 
 ### The control split
 
@@ -2651,6 +2662,222 @@ cat that we did not make"* **is** the condition.
 **Known limits.** The joiner visibly replays the fight from turn 0 (fast, but
 visible). A battle past the pending cap cannot be caught up — it says so and
 replays what it has.
+
+---
+
+## Steam Edition
+
+The fork's additions. Same protocol (proto 27), same session layer; what changed
+is how the mod gets into the process, how bytes travel, and five sync bugs that
+only showed up once two real players played whole areas over Steam
+(2026-11-14). Code: `src/net/mgmp_steam.*`, the Steam half of `mgmp_net.cpp`,
+`src/proxy/`.
+
+### `version.dll` — the drop-in
+
+The exe imports `VERSION.dll` (`VerQueryValueA`, `GetFileVersionInfoSizeA`,
+`GetFileVersionInfoA`) and `WINMM.dll`; `version.dll` is not a KnownDLL, so a
+copy beside `Mewgenics.exe` wins and loads however the game is started, Steam's
+Play button included. The `mgmp_version` target is `MGMP_SOURCES` +
+`src/proxy/` with `MGMP_PROXY` defined:
+
+- **Forwarding.** All 17 exports of System32 `version.dll` are `jmp [table+8*i]`
+  stubs (`version_forward.asm`, names via `version.def`); `DllMain` fills the
+  table with `LoadLibraryW(System32\version.dll)` + `GetProcAddress`. A jump
+  keeps every register and the stack, so no signature is needed —
+  `GetFileVersionInfoByHandle` is undocumented. Verified byte-for-byte against
+  the system DLL from a foreign process. None of our own static imports
+  (kernel32/user32/shell32/ws2_32/imm32) import `version.dll` — shell32 goes
+  through `api-ms-win-core-version-*` API sets, i.e. kernelbase — so there is no
+  load cycle.
+- **The frame gate.** Loaded with the exe we are in the process long before the
+  loader's park point. `DllMain` hooks `ApplicationBase::FrameBegin` (pinned RVA
+  + `kParkSig`, the loader's own check); on the first call the gate removes
+  itself, `MH_Uninitialize`s, runs `init_thread` **on the game thread**, and calls
+  `FrameBegin` again — which is now either our real `h_FrameBegin` or the
+  original. Same moment the loader injects at: after `initSystems`, before
+  frame 1. A build whose prologue does not match falls back to the late-attach
+  thread, which then refuses to hook with the reason logged.
+- **Only in Mewgenics.exe** (checked by module name) and **only one copy**: the
+  first copy creates `Local\mgmp_active_<pid>`; an injected `mgmp.dll` that finds
+  it stands down.
+- **Process exit.** `DLL_PROCESS_DETACH` with `lpReserved != NULL` calls
+  `steam_detach()` first. By then the game has run `SteamAPI_Shutdown`, and a
+  `LeaveLobby` from detach took an AV inside `steamclient64.dll` on every quit
+  (stack: `ntdll → VERSION.dll → steamclient`).
+- `ui.visible` defaults to false in this build (players get the Multiplayer
+  window; F1 is the debug panel). The **Multiplayer** window is drawn every
+  frame, so the ImGui context is brought up whether or not the panel is visible,
+  and the WndProc forwards input whenever the context is up. A Segoe UI font is
+  loaded for Cyrillic; without it the labels fall back to English.
+
+### Steam through the game's own `steam_api64.dll`
+
+No SDK is linked or shipped. `mgmp_steam.cpp` resolves the flat exports with
+`GetProcAddress` and declares the few structs that cross the boundary with the
+SDK's Windows layouts (pack 8), each pinned by a `static_assert`:
+`SteamNetworkingIdentity` 136 B, `SteamNetworkingMessage_t::m_pfnRelease` at
+184, `LobbyEnter_t` 24 B, `FriendGameInfo_t` 24 B.
+
+- **Callbacks** are registered with `SteamAPI_RegisterCallback` on a
+  hand-declared `CCallbackBase` whose virtuals are declared in the SDK's order —
+  the vtable is the ABI. They arrive on the game thread inside the game's own
+  `SteamAPI_RunCallbacks`: `GameLobbyJoinRequested_t` (333),
+  `GameRichPresenceJoinRequested_t` (337), `SteamNetworkingMessagesSessionRequest_t`
+  (1251). Call results (`LobbyCreated_t` 513, `LobbyEnter_t` 504) are **polled**
+  with `IsAPICallCompleted` / `GetAPICallResult`.
+- **Lobby:** friends-only, `kMaxPeers` members; rich presence `connect` =
+  `+connect_lobby <id>`, so both an invite and the friends list's "Join game"
+  land in the same parser (and the same string on the command line when Steam
+  launches the game for an invite). The friend list's lobbies come from
+  `GetFriendGamePlayed` filtered by our AppID.
+- **Who is in the session is the lobby.** The host turns lobby membership into
+  `net_steam_peer_joined/left`; the client watches the owner. Messages from
+  anyone else are dropped, and a session request is accepted only from a lobby
+  member or an already-known peer.
+- **A single membership reading is not evidence.** Measured: mid-battle the
+  client read a member list without the host for one frame, dropped the
+  session, left the lobby — and the host then saw the client leave. Now a
+  reading is trusted only if it contains *us*, and a member counts as gone only
+  after `kGoneMs` (8 s) of absence.
+- **Transport.** Messages go on our own channel (`0x6D67`), reliable +
+  auto-restart. Every Steam message starts with one transport byte —
+  whole / part / last — because a long campaign's save outgrows Steam's 512 KB
+  message cap; frames are cut into 256 KB slices. **All sends are queued and
+  put on the wire by the Steam thread**: Steam's per-peer send buffer is ~512 KB
+  by default and a reliable send past it fails with `k_EResultLimitExceeded`
+  (25) instead of waiting, and waiting on the game thread would freeze the game.
+  One FIFO keeps per-peer order, which the session depends on (save before
+  cats). The client opens its session with a `PING`; `handle_frame` swallows
+  pings on both transports.
+- Caps raised for the same reason: `kMaxFrame` = `kMaxPayload` (8 MiB),
+  `kMaxSaveBytes` 7 MiB. A save over the old 4 MiB cap used to be reported as
+  "not on disk yet", forever.
+
+### The save directory is the logged-in SteamID
+
+`resolve_save_dir` used to pick the most recently written
+`<appdata>\Glaiel Games\Mewgenics\<id>\saves`. A directory's mtime changes when
+entries are created or removed, not when a save inside is rewritten, so on a
+machine with two account directories it picked the wrong one and every publish
+said "not on disk yet". It now uses `steam_self()` first and only guesses —
+loudly — without Steam. The client writes `mgmp_coop.sav` to the same place, so
+the same bug would have put it where the game never looks.
+
+### The host publishes a RUN, never a house
+
+A slot click loads either an adventure or the **House**, and the house is not
+replicated: publishing at the click handed the client a house copy, and the
+host then set out from its own house with nothing for the client to follow.
+`savefile_pump` now publishes only when `leave_in_run() && follow_on_map()` —
+which is also exactly when `flush_live_run` may write — and logs every ~30 s
+while waiting. A **confirmed** departure (`leave_departures()`, the same event
+that sends `HOSTLEFT`, never a raw reading — a screen transition can read
+Unknown for a moment) re-arms the publish, so every new run, including the next
+area after a home visit, reaches the client as a `fresh` pick.
+
+**A home visit is not the end of a run.** The `home` map node (type 4) loads the
+`House` scene mid-run; `mgmp_leave` reads that as OutOfRun and announces
+`HOSTLEFT`. On the client that is harmless (it is in its own house copy too and
+does nothing), and it is what re-arms the publish. When the `fresh` save then
+arrives at a client sitting in a house or in a stale run, `leave_request_quit`
+arms the Quit-To-Menu press; the Multiplayer window tells the player to press
+Esc. `leave_pump` no longer treats `House` as "got out" — only the menu or the
+save screen is. **Unverified:** that the house pause menu has
+`Button_PauseMenu_QuitToMenu`.
+
+**The pipe.** At house build (`0x1401EE6C2`) the game checks the save key
+`departed_first_real_adventure` and, if present, sets `house_pipe_unlocked`;
+`HousePipe` is placed only when that is set (`0x1401F106C`), and the Frank
+`house_pipe` script (`data/npc_scripts/combat_tutorial.gon`) shows after **End
+Day**. Not a mod bug — reported as one, measured not to be.
+
+### `SerializeCatData` is NOT idempotent on a live cat
+
+The game only deserializes into a freshly built `CatData`. CATSYNC deserializes
+over a live one, and `CatData+0x7A8` is handed to `sub_14022F1B0`, whose read
+branch takes a count and `push_back`s (`sub_140237320`, stride `0xB8`, MSVC
+`{first,last,end}`) onto the vector at **`+0x7B8` — `self_status_next_fight`,
+the `+1976` the event section names — without clearing it.** Measured: a client
+that had the host's save (Bleed 1 next fight) and then took the same cat in
+CATDATA started the battle with Bleed 2, took 2 per tick against the host's 1,
+and halted on turn 11 with `rng` identical and one cat's HP one apart.
+Statuses are not hashed, so nothing caught it earlier.
+
+`apply_now` now (1) skips a cat whose serialized bytes already match,
+(2) nulls that vector's triple before reading (the old buffer is leaked — it and
+its `std::string`s live on the game's heap), and (3) re-serializes after
+applying and logs **Error** if the bytes differ, which is what will name the next
+field that appends. **Any other `SerializeCatData` vector may behave the same;
+only `+0x7B8` has been read.**
+
+### Facing comes from actions only — the second writer
+
+The `T_UpdateDecision` freeze was not enough. Measured over Steam: turns 0–2
+agreed on `rng+queue+state`, then an AI cat chose `(4,7)` and a 4-damage
+backstab on the host and `(5,6)` and a 3-damage hit on the client. The STATE DIFF
+named the only differing input: the **target's** facing, `(0,-1)` on the host
+that owns that cat, `(0,1)` on the client. The owner's machine runs
+`PlayerBrain`'s own previews (the `TacticsObject::Move` round trip and more);
+the other machine runs none.
+
+Instead of hunting writers: `lockstep_facing_after_apply` records every live
+snapshot cat's facing after each **outermost** `ApplyTurnAction`, and
+`lockstep_facing_before` puts it back before the next one and at the top of
+every `UpdateDecision` (before the preview freeze snapshots). Both peers reach
+those points in the same logical order, so anything that turned a cat in
+between is discarded identically. Only cats in the live list are written — a
+departed cat's object may be freed. The trade is fidelity: a facing the game
+would set only after an action returned (a late animation write) is not kept,
+on either peer. `LOCKSTEP done:` prints the correction counts.
+
+### The control split follows the RUN, not the battle
+
+Roster order is spawn order, laid out afresh every battle, so "the first half of
+the humans" was a different pair of cats each fight. The humans are now ranked
+by their index in the run's cat list (`MewDirector+1464/+1472`, via
+`catsync_run_cat_ptrs`). Nothing records which `CatData` a `Character` was built
+from, so the link is **found**: the first qword offset in the Character
+(`< 0xF00`) at which every human cat points at a *different* `CatData` of the
+run. The offset is logged once; if none qualifies the split falls back to
+roster order with a Warn. `CONTROL` still cross-checks the result.
+
+### The host re-asserts everything at every node
+
+Both publishers deduped against what the host last sent, so a change made on
+the **client** (both players equipped the same new hat on different cats) was
+invisible to them, and the client's cat kept the hat. `follow` now calls
+`catsync_forget` + `invsync_forget` before every node publish; the client skips
+identical cats, so this costs a few KB per node. Equipment is therefore
+host-only — the client's edits are overwritten at the next node.
+
+### Smaller things
+
+- Logs: `mgmp_trace.log` is rewritten each launch and the previous one is
+  rotated to `mgmp_trace.prev.log` — no more one-file-per-launch.
+  `net_test.ps1` reads both naming schemes.
+- Session requests: `session_request_host_steam` / `session_request_join_steam`,
+  applied at the top of `session_update` like the TCP pair; `steam_pump` runs
+  there every frame and turns an accepted invite into a join request.
+- `MGMP_VERSION` (CMake cache var, `1.2.3`) is stamped into all three binaries'
+  VERSIONINFO; CI passes it from the tag.
+
+### Running it locally without Steam's launcher
+
+`net_test.ps1` launches the exe directly, so `steam_appid.txt` (`686060`) must be
+beside `Mewgenics.exe` or `SteamAPI_RestartAppIfNecessary` relaunches through
+Steam. `SteamAPI_Init() Failed` with Steam running means the **logged-in Steam
+account does not own the game** (a different account than `LastOwner` in the
+app manifest) — not a sandbox or a second-instance problem.
+
+### CI
+
+`.github/workflows/release.yml` (windows-2022): configure with the tag's version,
+build, `ctest`, package `version.dll`, a `mgmp-steamedition-<v>.zip`, a
+`mgmp-loader-<v>.zip` and `SHA256SUMS.txt`; a `v*` tag publishes a GitHub
+release whose notes carry the supported game version (`GAME_VERSION`,
+`GAME_SHA256` at the top of the workflow — **update both when the game
+updates**). `test_resolve_live` skips without the game, so CI runs every test.
 
 ---
 

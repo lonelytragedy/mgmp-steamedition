@@ -14,6 +14,16 @@
 cmake_minimum_required(VERSION 3.21)
 project(mgmp LANGUAGES C CXX)
 
+set(MGMP_VERSION "0.0.0" CACHE STRING "version stamped into the binaries, MAJOR.MINOR.PATCH")
+string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)" _mgmp_v "${MGMP_VERSION}")
+if(NOT _mgmp_v)
+    message(FATAL_ERROR "MGMP_VERSION must look like 1.2.3, got '${MGMP_VERSION}'")
+endif()
+set(MGMP_RC_DEFS
+    "MGMP_RC_FILEVER=${CMAKE_MATCH_1},${CMAKE_MATCH_2},${CMAKE_MATCH_3},0"
+    "MGMP_RC_FILEVER_STR=\"${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}.0\""
+)
+
 if(NOT WIN32)
     message(FATAL_ERROR "mgmp targets Mewgenics.exe, a Windows x64 PE -- see CLAUDE.md")
 endif()
@@ -90,7 +100,7 @@ set(MGMP_SOURCES
 
 add_library(mgmp SHARED res/mgmp_dll.rc ${MGMP_SOURCES})
 set_target_properties(mgmp PROPERTIES OUTPUT_NAME "mgmp" PREFIX "")
-target_compile_definitions(mgmp PRIVATE
+target_compile_definitions(mgmp PRIVATE ${MGMP_RC_DEFS}
     WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS NOMINMAX
 )
 target_compile_options(mgmp PRIVATE /W3 /utf-8)
@@ -114,13 +124,14 @@ target_link_libraries(mgmp PRIVATE minhook kernel32 user32 shell32)
 # for the loader. See src/proxy/version_proxy.cpp.
 enable_language(ASM_MASM)
 add_library(mgmp_version SHARED
+    res/mgmp_dll.rc
     ${MGMP_SOURCES}
     src/proxy/version_proxy.cpp
     src/proxy/version_forward.asm
     src/proxy/version.def
 )
 set_target_properties(mgmp_version PROPERTIES OUTPUT_NAME "version" PREFIX "")
-target_compile_definitions(mgmp_version PRIVATE
+target_compile_definitions(mgmp_version PRIVATE ${MGMP_RC_DEFS}
     WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS NOMINMAX MGMP_PROXY
 )
 target_compile_options(mgmp_version PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/W3;/utf-8>")
@@ -131,7 +142,7 @@ target_include_directories(mgmp_version PRIVATE
 target_link_libraries(mgmp_version PRIVATE minhook kernel32 user32 shell32)
 
 add_executable(mgmp_loader loader/mgmp_loader.cpp res/mgmp_loader.rc)
-target_compile_definitions(mgmp_loader PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_compile_definitions(mgmp_loader PRIVATE ${MGMP_RC_DEFS} _CRT_SECURE_NO_WARNINGS)
 target_compile_options(mgmp_loader PRIVATE /W3)
 # third_party for json.hpp: the loader parses mgmp.json for the game path,
 # which is the one setting it needs and the DLL cannot supply.
