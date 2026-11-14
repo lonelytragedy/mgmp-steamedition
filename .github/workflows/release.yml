@@ -34,7 +34,7 @@ jobs:
           "Building version $v"
 
       - name: Configure
-        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DMGMP_VERSION=${{ steps.ver.outputs.version }}
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 "-DMGMP_VERSION=${{ steps.ver.outputs.version }}"
 
       - name: Build
         run: cmake --build build --config Release -- -m
