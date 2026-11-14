@@ -1,325 +1,198 @@
-# mgmp — co-op multiplayer for Mewgenics
+# mgmp Steam Edition — co-op multiplayer for Mewgenics over Steam
 
-An unofficial mod that lets two people play one Mewgenics adventure together.
+An unofficial mod that lets two people play one Mewgenics adventure together —
+invite a friend through Steam and play the same run, the same map, the same cats
+and the same fights.
 
-The host starts a run, the other player joins, and from then on you share
-everything: the same map, the same cats, the same gold, the same fights. Your
-cats are split between you — you each take turns with your own half — and the
-run continues until one of you wins it or loses it. Together.
+This is a fork of [mgmp](https://github.com/SanTertrust/mgmp) by SanTertrust,
+which did the hard part: deterministic battle lockstep and host-authoritative
+sync of everything outside battle. The Steam Edition replaces "forward a port
+and edit a config file" with **one file and a button**.
 
 It is not an official feature and has nothing to do with the developers of
-Mewgenics. It is a hobby project built by reading the game's compiled code.
-
-Thanks [Claude](https://claude.ai/). The human didn't write even a single line of code.
+Mewgenics.
 
 ---
 
-## Status
+## What is different in the Steam Edition
 
-**It works, and it has been played over the internet for a full run.**
+| | original mgmp | Steam Edition |
+|---|---|---|
+| Install | loader + `mgmp.dll` + `mgmp.json` | drop **one** `version.dll` into the game folder |
+| Start | run `mgmp_loader.exe` | start the game from Steam as usual |
+| Connect | direct TCP, port forwarding or a VPN | Steam lobby + invite, Steam P2P with relay |
+| Host / join | config file or debug panel | **Multiplayer** button in the game |
 
-Here's [gameplay footage](https://youtu.be/IHc-92L6mGg) from a slightly older build.
+Plus fixes found while playing it over Steam:
 
-There is still a probability of encountering desynchronization, so report host logs AND clients logs.
-
-What that means in practice:
-
-- Battles are properly synchronised. Both players see the same dice rolls, the
-  same damage numbers, the same enemy decisions.
-- The map, shops, level-ups, events and your inventory all stay in step.
-- You can see each other's mouse cursor, and see what your partner is aiming at
-  before they commit to it.
-- If someone's connection drops, they can rejoin — even in the middle of a
-  fight — and the mod replays the battle up to the current turn to catch them
-  up.
-
-**Still rough:**
-
-- **Connecting is manual.** There is no lobby or friends list. One of you needs
-  to be reachable on the internet, which usually means forwarding a port on
-  your router. See [Connecting](#connecting-to-each-other).
-- **Two players only, really.** The code was written with three and four
-  players in mind, but that has never actually been tested. Assume two.
-- **The house is not shared.** Breeding, furniture and everything you do at
-  home is yours alone. Only the adventure is co-op. This was a deliberate
-  decision, not an oversight. So, make sure to join the host **while they are in the Adventure mode**.
-- **It is pinned to one version of the game.** The mod tries hard to survive a
-  game update on its own, but a big patch may still break it until someone
-  updates it. See [When the game updates](#when-the-game-updates).
-- **Expect bugs.** This is a reverse-engineered mod hooking into a game that
-  was never designed to be played this way.
+- **Statuses no longer double on the client.** Applying a host cat over a live
+  cat appended its next-fight statuses (e.g. Bleed 1 became Bleed 2 on the
+  client) — a guaranteed desync a few turns into the next battle.
+- **Facing comes from actions only.** Previews on the cat owner's machine could
+  turn a cat, the AI picked a different backstab square, and the battle split.
+- **Each player keeps the same cats for the whole run**, instead of a new split
+  every battle.
+- **The client is never handed a copy of the host's house.** The run is sent
+  once the host is out on the map, and again every time the host sets out
+  after a visit home.
+- **The host's cats and inventory are re-sent at every node**, so a change made
+  on the client (an item equipped there) cannot linger.
+- **A lobby hiccup does not end the session** — a player must be missing for
+  several seconds before they count as gone.
+- The save folder is found by the logged-in Steam account, not guessed.
+- No crash on quitting the game; one log file instead of one per launch.
 
 ---
 
 ## What you need
 
 - **Windows**, 64-bit.
-- **Mewgenics**, the same version on both machines, installed from the same
-  place. If one of you has a different build of the game, the mod will notice
-  and complain — that mismatch would eventually cause the two games to drift
-  apart. Currently supported `1.1.21239`.
-- A way to reach each other over the network (see below).
-
-To build it yourself you also need **Visual Studio 2022/2026** (or just the MSVC
-build tools) and **CMake 3.21+**.
+- **Mewgenics on Steam**, the same version on both machines (currently
+  `1.1.21239`). The mod checks this when you connect.
+- You and your partner are **friends on Steam**.
+- **Both players** install the same build of the mod.
 
 ---
 
-## Getting it running
+## Install
 
-### The easy way: Steam, one file
+1. Steam → Library → Mewgenics → right click → **Manage → Browse local files**.
+2. Copy `version.dll` into that folder, next to `Mewgenics.exe`.
 
-The build also produces `version.dll`, the same mod packaged as a drop-in:
+That is all: no loader, no config, no ports. To uninstall, delete `version.dll`.
 
-1. Copy `version.dll` into the game folder, next to `Mewgenics.exe`
-   (Steam -> Mewgenics -> Manage -> Browse local files). Both players do this.
-2. Start the game normally from Steam. No loader, no `mgmp.json`, no ports.
-3. A **Multiplayer** button sits in the top-right corner. The host presses
-   **Host over Steam**, then **Invite a friend** (the Steam overlay opens).
-4. The friend accepts the invite in Steam, or opens the same window and presses
-   **Join** next to the host's name. They wait at the main menu; the host is in
-   Adventure mode, as with the TCP route.
+Get `version.dll` from this repository's Releases page, or build it yourself
+(see [Building](#building)).
 
-Traffic goes over Steam's P2P networking (`ISteamNetworkingMessages`, relayed by
-Valve when a direct path fails) through the game's own `steam_api64.dll`; the
-lobby is friends-only and decides who is in the session. F1 still opens the debug
-panel. To uninstall, delete `version.dll`. Do not also run `mgmp_loader.exe`: the
-second copy notices the first and stands down.
+---
 
-### Prebuilt
+## Playing
 
-The easiest way. Download the archive from the [Releases](https://github.com/SanTertrust/mgmp/releases).
+Both players start the game normally from Steam. A **Multiplayer** button sits
+in the top-right corner of the screen.
 
-### 1. Build
+**Host** (the player whose save you both play):
+
+1. **Multiplayer → Host over Steam → Invite a friend.**
+2. Main menu → Play → **click your save slot.** This click is how the mod knows
+   which save to share — do it *after* the lobby is open. If you were already in
+   a run, quit to the main menu and pick the slot again.
+3. If the slot opens in your house, gather your cats and set out. The moment you
+   are on the map, the run is sent to your partner.
+
+**Partner:**
+
+1. Stay on the **main menu**.
+2. Accept the invite in Steam, or open **Multiplayer** and press **Join** next to
+   the host's name.
+3. Wait. When the host's run arrives, the mod presses Play, picks the slot and
+   loads it for you. Your own saves are never touched — the host's run goes into
+   a separate `mgmp_coop.sav`.
+
+From there you just play: when it is your cat's turn, you move it; when it is
+your partner's, you watch. Map choices, events, shops and level-ups are made by
+the host and happen identically on both screens.
+
+### Visiting home between areas
+
+The house is not shared (see below). When the host goes home, each of you is in
+your own copy of it. When the host sets out again, the partner's Multiplayer
+window says so: **press Esc** and the mod quits to the menu and loads the host's
+new run.
+
+---
+
+## Known limits
+
+- **The house is single-player.** Breeding, furniture, the day cycle and
+  everything at home happen only for the host. The partner's copy is a copy.
+- **Equipment is managed by the host.** Anything the partner equips is reset to
+  the host's version at the next map node — ask the host to equip it.
+- **Cats are split automatically:** the first half of the run's cats are the
+  host's, the rest the partner's, for the whole run.
+- **Two players.** The code is written for up to four, but only two have been
+  played.
+- **One game version.** A big game patch may break the mod until it is updated.
+- **Expect bugs.** It is a reverse-engineered mod in a game that was never built
+  for this.
+
+---
+
+## When something goes wrong
+
+Every battle turn and every map node, both games compare a fingerprint of their
+state. If they ever disagree, the mod **stops both games** and writes what
+differed to the log, instead of letting you play on in two different worlds.
+
+The mod writes `mgmp_trace.log` in the game folder, overwritten on each launch;
+the launch before it is kept as `mgmp_trace.prev.log`. To report a problem, send
+both files from **both** players — one side's log can show that something went
+wrong, but rarely what.
+
+**F1** opens the debug panel: connection state, which cats each player controls,
+turn agreement and a live log.
+
+---
+
+## Building
+
+You need **Visual Studio 2022/2026** (or the MSVC build tools) and
+**CMake 3.21+**.
 
 ```powershell
 cmake -B build -A x64
 cmake --build build --config Release
+ctest --test-dir build --build-config Release
 ```
 
-That produces two files in `build\Release\`:
+`build\Release\` then contains:
 
 | file | what it is |
 |---|---|
-| `mgmp_loader.exe` | what you run. Starts the game with the mod loaded. |
-| `mgmp.dll` | the mod itself. The loader puts it into the game. |
-| `mgmp.json` | your settings. Created automatically the first time. |
+| `version.dll` | the Steam Edition: drop it next to `Mewgenics.exe` |
+| `mgmp.dll` + `mgmp_loader.exe` | the original injector route, still supported |
 
-The three need to sit in the same folder. Everything else — Dear ImGui,
-MinHook — is compiled straight into `mgmp.dll`, so there is nothing else to
-install or copy around.
+### The original route (direct TCP)
 
-### 2. Point it at your game
-
-Open `mgmp.json` and set `game` to wherever Mewgenics actually is:
-
-```json
-"game": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Mewgenics\\Mewgenics.exe"
-```
-
-(Windows paths in JSON need doubled backslashes.)
-
-### 3. Choose who hosts
-
-The **host** owns the run. Their save file is the one you both play.
-
-In the host's `mgmp.json`:
-
-```json
-"net": { "role": "host", "addr": "0.0.0.0", "port": 27600 }
-```
-
-In the other player's:
-
-```json
-"net": { "role": "client", "addr": "<the host's IP address>", "port": 27600 }
-```
-
-Leave `role` as `"off"` to play alone with the mod loaded but dormant.
-
-### 4. Play
-
-Both of you run `mgmp_loader.exe`. It will open the Mewgenics based on config.
-
-You can also just **drag and drop** `Mewgenics.exe` into `mgmp_loader.exe`.
-
-I'd recommend launch it from a command line/powershell, because it logs stuff, such as needing the `steam_appid.txt` file near the `Mewgenics.exe`.
-
-The host picks a save slot and starts playing. Clients connected to the host cannot select save or start battle in Adventure mode, nor can they perform other actions that alter cat data.
-
-The joining player does not have to do anything. Sit on the main menu — when
-the host's save arrives, the mod presses **Play** for you, picks the slot, and
-loads the host's run. Your own save files are never touched; the host's run goes
-into a separate `mgmp_coop.sav`.
-
-> **Set `net.role` in `mgmp.json`.** The panel's `host` / `join` buttons now
-> configure the session properly on their own, but launching with the role
-> already set is still the tested path, and it is the only one that installs
-> every hook at startup rather than partway through.
-
-From there you just play. When it is your cat's turn, you move it. When it is
-your partner's cat, you watch. Cats controlled by the computer are handled by
-both machines identically and need no input from anyone.
-
-If you would rather attach the mod to a copy of the game that is already
-running:
-
-```powershell
-.\mgmp_loader.exe --attach <process id>
-```
-
----
-
-## Connecting to each other
-
-The mod talks over a plain TCP connection on port **27600** by default. There
-is no matchmaking server, no relay, and no Steam lobby — the joining player
-connects straight to the host's IP address.
-
-That means one of two things:
-
-- **On the same network** (same house, same Wi-Fi), it just works. The joining
-  player uses the host's local IP, something like `192.168.1.42`.
-- **Over the internet**, the host has to be reachable. In practice that means
-  forwarding TCP port 27600 on their router to their PC, and the joining player
-  using the host's public IP.
-
-If port forwarding is not an option, any tool that puts you both on one virtual
-network (Hamachi, Tailscale, ZeroTier, Radmin) works fine — from the mod's
-point of view that is just a LAN.
-
-There are **no timeouts anywhere**, on purpose. If your partner's game is slow
-to respond, yours waits instead of guessing. A game that visibly pauses is much
-better than two games quietly playing different stories.
-
----
-
-## While you are playing
-
-### The debug panel
-
-Press **F1** to show or hide an overlay panel. It reports whether you are
-connected, which cats each player controls, how many turns have been agreed on,
-and a live log. If something looks wrong, this is the first place to look.
-
-You can change the key, or turn the panel off entirely, in `mgmp.json` under
-`ui`.
-
-### Seeing your partner
-
-Their mouse cursor appears on your screen, and when they are choosing where to
-attack, you see the same targeting highlight they do. None of this affects the
-game — it is purely so you can tell what they are thinking.
-
-One quirk: the cursor follows the board tile they are pointing at, not the
-exact pixel, if the two of you have panned the camera differently. The tile is
-always right.
-
-### If the two games disagree
-
-Every turn, both machines compare notes on the state of the battle. If they
-ever come out different, the mod **stops both games immediately** and writes
-what differed to the log, rather than letting you play on in two increasingly
-different worlds.
-
-If that happens, the log files are the interesting part — see below.
-
-### Logs
-
-The mod writes `mgmp_trace.log` next to the DLL (the game folder for the
-drop-in `version.dll`), overwritten on every launch; the launch before it is kept
-as `mgmp_trace.prev.log`. If you want to report a problem, those files from
-*both* players are what make it diagnosable -- send the `.prev` one too if the
-game has been restarted since. A single side's log
-can usually only show that something went wrong, not what.
-
----
-
-## Settings
-
-Everything lives in `mgmp.json`, beside the loader.
-
-| setting | what it does |
-|---|---|
-| `game` | full path to `Mewgenics.exe` |
-| `log` | log file name |
-| `net.role` | `off`, `host`, or `client` |
-| `net.addr` | who to connect to (client), or what to listen on (host) |
-| `net.port` | default `27600` |
-| `net.control` | which cats you control. Leave on `"auto"` — it splits them evenly by itself. |
-| `ui.enabled` | whether the debug panel exists at all |
-| `ui.visible` | whether it starts visible |
-| `ui.key` | key to toggle it, default `F1` |
-
-The `debug` block is for development and is best left alone. `record` in
-particular makes the mod log an enormous amount of detail about the game's
-random number generator, which is useful when chasing a bug and pure overhead
-otherwise.
-
-Only settings that are genuinely meant to be changed live in this file.
-Everything else is a compile-time constant in `src/core/mgmp_tuning.h`, each
-one with a note saying why it is not user-facing.
+The loader still works exactly as in upstream mgmp: put `mgmp.dll`,
+`mgmp_loader.exe` and `mgmp.json` in one folder, set `game` and `net.role` /
+`net.addr` in `mgmp.json`, and run the loader on both machines. It connects over
+TCP port 27600, so one side has to be reachable (port forwarding, or a virtual
+LAN such as Tailscale or ZeroTier). Do not use it together with `version.dll` —
+the second copy notices the first and stands down.
 
 ---
 
 ## How it works, briefly
 
-Two players staying in sync is not one problem, it is two, and they need
-opposite solutions.
+**Battles are deterministic**, so only the players' clicks are sent; both games
+compute the outcome and compare a hash every turn (lockstep). **Everything
+outside battle** is decided by the host and sent as state — cats, inventory, run
+history — or as "which option the host picked", which the partner's game then
+plays out identically.
 
-**Battles are deterministic.** Given the same starting position, the game plays
-out identically every time, right down to the individual dice rolls — this was
-measured, not assumed. So the mod does not send the *result* of anything.
-It sends only what each player clicked, and both machines work out the
-consequences independently and arrive at the same place. This is called
-lockstep, and it is why battles cost almost no bandwidth.
+The Steam Edition carries the same messages over Steam's P2P networking
+(`ISteamNetworkingMessages`, relayed by Valve when a direct path fails), through
+the game's own `steam_api64.dll` — no Steamworks SDK is shipped. A friends-only
+lobby decides who is in the session. `version.dll` forwards every real
+`version.dll` call to Windows and starts the mod on the game's first frame.
 
-**Everything outside battle is not deterministic**, but it is saveable. The
-game already knows how to write a cat, an inventory and a run's history to
-disk. So for the map, shops, level-ups and events, the host simply decides and
-sends the result over.
-
-Both halves are checked constantly. Every turn of every battle, and every time
-you enter a map node, the two machines exchange a fingerprint of their state
-and compare it. Agreement is proven, not hoped for.
-
-The full technical story — every address, struct offset, measurement and dead
-end — is in `CLAUDE.md`. It is long, and it is the real documentation.
-
----
-
-## Project layout
-
-```
-src/core/          loading, hooking, logging, config, crash reporting
-src/determinism/   random number tracking, recording and replay
-src/net/           the network transport and the message format
-src/session/       everything that actually keeps two games in step
-src/ui/            the debug panel and the on-screen overlay
-loader/            mgmp_loader.exe
-tests/             unit tests for the logic that can be tested alone
-tools/             Python and PowerShell helpers used while developing
-third_party/       Dear ImGui, MinHook, stb_image, nlohmann/json
-```
-
-Run the tests with:
-
-```powershell
-ctest --test-dir build --build-config Release
-```
+The full technical story of the original mod — addresses, struct offsets,
+measurements and dead ends — is in `CLAUDE.md`.
 
 ---
 
 ## A note on what this is
 
-This mod contains no Mewgenics code, art or data. It is an independent program
-that attaches to a legally purchased copy of the game on your own machine. You
-need to own the game; nothing here will help you play it if you do not.
+This mod contains no Mewgenics code, art or data. It attaches to a legally
+purchased copy of the game on your own machine; you need to own the game.
 
 It is not affiliated with, endorsed by, or supported by the developers or
-publisher of Mewgenics. If it breaks your save, that is on you — back up your
-saves before using it. If you report a bug to the game's developers while this
-mod is loaded, please mention that it is loaded.
+publisher of Mewgenics. Back up your saves before using it. If you report a bug
+to the game's developers while this mod is loaded, mention that it is loaded.
 
-Mewgenics is by Tyler Glaiel and Edmund McMillen. It is a very good game and
-you should buy it.
+Mewgenics is by Tyler Glaiel and Edmund McMillen. It is a very good game and you
+should buy it.
+
+Based on [mgmp](https://github.com/SanTertrust/mgmp) by SanTertrust. MIT
+licensed, like the original — see `LICENSE`.
