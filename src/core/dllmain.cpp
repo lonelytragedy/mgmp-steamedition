@@ -14,10 +14,16 @@
 #include "mgmp_replay.h"
 #include "mgmp_session.h"
 #include "mgmp_ui.h"
+#include "mgmp_steam.h"
 
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
+
+#ifdef MGMP_PROXY
+#include "MinHook.h"
+namespace mgmp_proxy { bool load_system_version(); }
+#endif
 
 namespace {
 
@@ -198,20 +204,85 @@ DWORD WINAPI init_thread(LPVOID) {
     return 0;
 }
 
+bool claim_process() {
+    wchar_t name[64];
+    swprintf_s(name, L"Local\\mgmp_active_%lu", GetCurrentProcessId());
+    HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, name);
+    if (!ev) return true;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) { CloseHandle(ev); return false; }
+    return true;
+}
+
+#ifdef MGMP_PROXY
+
+typedef void(__fastcall* FrameBeginFn)(void*);
+FrameBeginFn g_gate_orig = nullptr;
+uintptr_t    g_park      = 0;
+
+void __fastcall frame_gate(void* self) {
+    MH_DisableHook((void*)g_park);
+    MH_RemoveHook((void*)g_park);
+    MH_Uninitialize();
+    breadcrumb("gate: first frame -- running init on the game thread");
+
+    init_thread(nullptr);
+
+    ((FrameBeginFn)g_park)(self);
+}
+
+bool install_gate() {
+    const uintptr_t base = (uintptr_t)GetModuleHandleW(nullptr);
+    g_park = base + mgmp::kParkRva;
+    if (memcmp((const void*)g_park, mgmp::kParkSig, sizeof(mgmp::kParkSig)) != 0) {
+        breadcrumb("gate: FrameBegin prologue does not match the pinned build");
+        return false;
+    }
+    if (MH_Initialize() != MH_OK) return false;
+    if (MH_CreateHook((void*)g_park, (void*)&frame_gate, (void**)&g_gate_orig) != MH_OK ||
+        MH_EnableHook((void*)g_park) != MH_OK) {
+        MH_Uninitialize();
+        return false;
+    }
+    return true;
+}
+
+bool host_is_game() {
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const wchar_t* base = wcsrchr(exe, L'\\');
+    return _wcsicmp(base ? base + 1 : exe, L"Mewgenics.exe") == 0;
+}
+#endif
+
 } // namespace
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
     switch (reason) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(module);
+#ifdef MGMP_PROXY
+        if (!mgmp_proxy::load_system_version()) return FALSE;
+        if (!host_is_game()) break;
+#endif
         compute_dll_dir(module);
         breadcrumb("DllMain: PROCESS_ATTACH");
+        if (!claim_process()) {
+            breadcrumb("DllMain: another copy of mgmp is already running here -- standing down");
+            break;
+        }
+#ifdef MGMP_PROXY
+        if (install_gate()) {
+            breadcrumb("DllMain: drop-in -- waiting for the first frame");
+            break;
+        }
+#endif
         // Do the real work off the loader lock. When injected into a suspended
         // process this still runs before the game's entry point gets going.
         CreateThread(nullptr, 0, init_thread, nullptr, 0, nullptr);
         breadcrumb("DllMain: init thread created");
         break;
     case DLL_PROCESS_DETACH:
+        if (reserved) mgmp::steam_detach();
         mgmp::hooks_uninstall();
         // After the hooks are gone, so nothing can append to a closed stream.
         mgmp::session_shutdown();

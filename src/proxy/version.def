@@ -1,0 +1,19 @@
+LIBRARY version
+EXPORTS
+    GetFileVersionInfoA=mgmp_fwd_GetFileVersionInfoA
+    GetFileVersionInfoByHandle=mgmp_fwd_GetFileVersionInfoByHandle
+    GetFileVersionInfoExA=mgmp_fwd_GetFileVersionInfoExA
+    GetFileVersionInfoExW=mgmp_fwd_GetFileVersionInfoExW
+    GetFileVersionInfoSizeA=mgmp_fwd_GetFileVersionInfoSizeA
+    GetFileVersionInfoSizeExA=mgmp_fwd_GetFileVersionInfoSizeExA
+    GetFileVersionInfoSizeExW=mgmp_fwd_GetFileVersionInfoSizeExW
+    GetFileVersionInfoSizeW=mgmp_fwd_GetFileVersionInfoSizeW
+    GetFileVersionInfoW=mgmp_fwd_GetFileVersionInfoW
+    VerFindFileA=mgmp_fwd_VerFindFileA
+    VerFindFileW=mgmp_fwd_VerFindFileW
+    VerInstallFileA=mgmp_fwd_VerInstallFileA
+    VerInstallFileW=mgmp_fwd_VerInstallFileW
+    VerLanguageNameA=mgmp_fwd_VerLanguageNameA
+    VerLanguageNameW=mgmp_fwd_VerLanguageNameW
+    VerQueryValueA=mgmp_fwd_VerQueryValueA
+    VerQueryValueW=mgmp_fwd_VerQueryValueW

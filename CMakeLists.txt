@@ -33,8 +33,9 @@ option(MGMP_BUILD_TESTS "build the pure-logic unit tests in tests/" ON)
 # same as build.ps1 compiling its .c files directly into the DLL link).
 add_subdirectory(third_party/minhook)
 
-add_library(mgmp SHARED
-    res/mgmp_dll.rc
+# Everything mgmp.dll and the drop-in version.dll share. One list, so the two
+# can never be different mods.
+set(MGMP_SOURCES
     src/core/dllmain.cpp
     src/core/mgmp_hooks.cpp
     src/core/mgmp_log.cpp
@@ -51,6 +52,7 @@ add_library(mgmp SHARED
     src/determinism/mgmp_rng.cpp
     src/determinism/mgmp_replay.cpp
     src/net/mgmp_net.cpp
+    src/net/mgmp_steam.cpp
     src/session/mgmp_lockstep.cpp
     src/session/mgmp_session.cpp
     src/session/mgmp_follow.cpp
@@ -85,11 +87,13 @@ add_library(mgmp SHARED
     third_party/imgui/backends/imgui_impl_win32.cpp
     third_party/imgui/backends/imgui_impl_opengl3.cpp
 )
+
+add_library(mgmp SHARED res/mgmp_dll.rc ${MGMP_SOURCES})
 set_target_properties(mgmp PROPERTIES OUTPUT_NAME "mgmp" PREFIX "")
 target_compile_definitions(mgmp PRIVATE
     WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS NOMINMAX
 )
-target_compile_options(mgmp PRIVATE /W3)
+target_compile_options(mgmp PRIVATE /W3 /utf-8)
 # Flat quoted includes (#include "mgmp_hooks.h") resolve across folders via
 # these four dirs, so moving a file between layers never touches an #include.
 target_include_directories(mgmp PRIVATE
@@ -102,6 +106,29 @@ target_include_directories(mgmp PRIVATE
     third_party/imgui
 )
 target_link_libraries(mgmp PRIVATE minhook kernel32 user32 shell32)
+
+# The drop-in build: the same mod as mgmp.dll, packaged as version.dll so that
+# copying ONE file next to Mewgenics.exe is the whole install and the game is
+# started normally from Steam. It forwards the 17 real version.dll exports to
+# System32 (src/proxy) and starts itself on the first frame instead of waiting
+# for the loader. See src/proxy/version_proxy.cpp.
+enable_language(ASM_MASM)
+add_library(mgmp_version SHARED
+    ${MGMP_SOURCES}
+    src/proxy/version_proxy.cpp
+    src/proxy/version_forward.asm
+    src/proxy/version.def
+)
+set_target_properties(mgmp_version PROPERTIES OUTPUT_NAME "version" PREFIX "")
+target_compile_definitions(mgmp_version PRIVATE
+    WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS NOMINMAX MGMP_PROXY
+)
+target_compile_options(mgmp_version PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/W3;/utf-8>")
+target_include_directories(mgmp_version PRIVATE
+    src/core src/determinism src/net src/session src/ui src/proxy
+    third_party third_party/imgui third_party/minhook/include
+)
+target_link_libraries(mgmp_version PRIVATE minhook kernel32 user32 shell32)
 
 add_executable(mgmp_loader loader/mgmp_loader.cpp res/mgmp_loader.rc)
 target_compile_definitions(mgmp_loader PRIVATE _CRT_SECURE_NO_WARNINGS)

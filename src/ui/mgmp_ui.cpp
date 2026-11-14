@@ -21,6 +21,7 @@
 #include "mgmp_follow.h"
 #include "mgmp_combatlock.h"
 #include "mgmp_leave.h"
+#include "mgmp_steam.h"
 
 // Declared by imgui_impl_win32.h's owner rather than the header itself.
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
@@ -72,6 +73,12 @@ struct UI {
     // otherwise a hunt for the one row that matters.
     bool     scroll_to_marker = true;
     uint32_t last_node_count  = 0;
+
+    bool     mp_open = false;
+    bool     cyrillic = false;
+    DWORD    friends_at = 0;
+    FriendLobby friends[16];
+    int      friend_count = 0;
 };
 
 UI g;
@@ -477,6 +484,149 @@ void draw_connect() {
     }
 }
 
+const char* T(const char* ru, const char* en) { return g.cyrillic ? ru : en; }
+
+void refresh_friends() {
+    const DWORD now = GetTickCount();
+    if (g.friends_at && now - g.friends_at < 2000) return;
+    g.friends_at   = now;
+    g.friend_count = steam_friend_lobbies(g.friends, 16);
+}
+
+void mp_status_line() {
+    const NetState st = net_state();
+    const ImVec4 warn = level_colour(LogLevel::Warn), good = level_colour(LogLevel::Good),
+                 bad  = level_colour(LogLevel::Error);
+    if (lockstep_halted()) {
+        ImGui::TextColored(bad, "%s", T(u8"Рассинхрон: игра остановлена. Логи: mgmp_trace.log",
+                                        "Desync: the game stopped. Logs: mgmp_trace.log"));
+        return;
+    }
+    if (session_ready()) {
+        ImGui::TextColored(good, T(u8"Подключено, игроков: %u", "Connected, players: %u"),
+                           (unsigned)net_peer_count());
+        return;
+    }
+    if (st == NetState::Failed) { ImGui::TextColored(bad, "%s", net_error()); return; }
+    if (st == NetState::Closed) {
+        ImGui::TextColored(bad, "%s", T(u8"Хост отключился. Выйди из лобби и зайди снова.",
+                                        "The host disconnected. Leave and join again."));
+        return;
+    }
+    if (!session_is_steam() && !net_active() && session_last_action()[0] == '!') {
+        ImGui::TextColored(bad, "%s", session_last_action() + 3);
+        return;
+    }
+    switch (steam_lobby_state()) {
+        case LobbyState::Creating:
+            ImGui::TextColored(warn, "%s", T(u8"Создаю лобби...", "Creating a lobby...")); break;
+        case LobbyState::Joining:
+            ImGui::TextColored(warn, "%s", T(u8"Вхожу в лобби...", "Joining the lobby...")); break;
+        case LobbyState::Hosting:
+            ImGui::TextColored(warn, "%s", T(u8"Лобби открыто, ждём друга",
+                                             "Lobby open, waiting for a friend")); break;
+        case LobbyState::Joined:
+            ImGui::TextColored(warn, "%s", T(u8"Соединяюсь с хостом...",
+                                             "Connecting to the host...")); break;
+        case LobbyState::Failed:
+            ImGui::TextColored(bad, "%s", steam_lobby_status()); break;
+        default: break;
+    }
+}
+
+void draw_multiplayer() {
+    const ImGuiIO& io = ImGui::GetIO();
+    const ImGuiWindowFlags fixed = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                   ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoFocusOnAppearing;
+
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 10.0f, 10.0f), ImGuiCond_Always,
+                            ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    if (ImGui::Begin("##mgmp_mp_button", nullptr, fixed)) {
+        const bool live = session_is_steam() || net_active();
+        char label[64];
+        _snprintf_s(label, sizeof(label), _TRUNCATE, "%s%s", live ? "* " : "",
+                    T(u8"Мультиплеер", "Multiplayer"));
+        if (ImGui::Button(label)) g.mp_open = !g.mp_open;
+    }
+    ImGui::End();
+    if (!g.mp_open) return;
+
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 10.0f, 56.0f), ImGuiCond_Always,
+                            ImVec2(1.0f, 0.0f));
+    if (!ImGui::Begin("##mgmp_mp", nullptr, fixed)) { ImGui::End(); return; }
+
+    ImGui::TextUnformatted(T(u8"Кооператив через Steam", "Co-op over Steam"));
+    ImGui::Separator();
+
+    if (!steam_ready()) {
+        ImGui::TextColored(level_colour(LogLevel::Error), "%s",
+                           T(u8"Steam недоступен. Запусти игру через Steam.",
+                             "Steam is not available. Start the game from Steam."));
+        ImGui::End();
+        return;
+    }
+
+    const bool busy  = session_request_pending();
+    const bool steam = session_is_steam();
+    const bool tcp   = !steam && net_active();
+    const LobbyState ls = steam_lobby_state();
+
+    mp_status_line();
+    ImGui::BeginDisabled(busy);
+
+    if (tcp) {
+        ImGui::TextWrapped("%s", T(u8"Идёт сессия по IP (из mgmp.json или панели F1).",
+                                   "An IP session is running (from mgmp.json or the F1 panel)."));
+        if (ImGui::Button(T(u8"Отключиться", "Disconnect"))) session_request_disconnect();
+    } else if (steam && net_role() == NetRole::Host) {
+        uint64_t members[8] = {};
+        const int n = steam_lobby_members(members, 8);
+        ImGui::Text(T(u8"В лобби: %d из %u", "In the lobby: %d of %u"), n, (unsigned)kMaxPeers);
+        for (int i = 0; i < n; ++i) ImGui::BulletText("%s", steam_persona_of(members[i]));
+        ImGui::BeginDisabled(ls != LobbyState::Hosting);
+        if (ImGui::Button(T(u8"Пригласить друга", "Invite a friend"))) steam_open_invite_dialog();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button(T(u8"Закрыть лобби", "Close the lobby"))) session_request_disconnect();
+        ImGui::TextDisabled("%s", T(u8"Друг ждёт в главном меню, ты в забеге (Adventure).",
+                                    "Your friend waits at the main menu, you are in a run."));
+    } else if (steam) {
+        if (leave_quit_pending())
+            ImGui::TextColored(level_colour(LogLevel::Warn), "%s",
+                               T(u8"Хост начал новый забег. Нажми Esc -- мод сам выйдет в меню\nи загрузит забег хоста.",
+                                 "The host set out on a new run. Press Esc -- the mod quits\nto the menu and loads the host's run."));
+        if (ImGui::Button(T(u8"Выйти из лобби", "Leave the lobby"))) session_request_disconnect();
+        ImGui::TextDisabled("%s", T(u8"Жди в главном меню: забег хоста загрузится сам.",
+                                    "Wait at the main menu: the host's run loads by itself."));
+    } else {
+        if (ImGui::Button(T(u8"Захостить через Steam", "Host over Steam")))
+            session_request_host_steam();
+        ImGui::SetItemTooltip("%s", T(u8"Создаёт лобби для друзей. Потом пригласи друга.",
+                                      "Creates a friends-only lobby. Then invite a friend."));
+
+        ImGui::SeparatorText(T(u8"Войти к другу", "Join a friend"));
+        refresh_friends();
+        if (!g.friend_count)
+            ImGui::TextDisabled("%s", T(u8"Никто из друзей сейчас не хостит.\nИли прими приглашение в Steam.",
+                                        "No friend is hosting right now.\nOr accept an invite in Steam."));
+        for (int i = 0; i < g.friend_count; ++i) {
+            ImGui::PushID(i);
+            if (ImGui::Button(T(u8"Войти", "Join"))) session_request_join_steam(g.friends[i].lobby);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(g.friends[i].name);
+            ImGui::PopID();
+        }
+    }
+
+    ImGui::EndDisabled();
+    ImGui::Separator();
+    ImGui::TextDisabled("%s", T(u8"F1 -- отладочная панель", "F1 -- debug panel"));
+    ImGui::End();
+}
+
 void draw_session() {
     ImGui::SetNextWindowSize(ImVec2(420, 260), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
@@ -589,7 +739,7 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
-    if (g.ready && g.visible) {
+    if (g.ready) {
         if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
             return 1;
 
@@ -660,6 +810,16 @@ bool bring_up() {
     ImGui::StyleColorsDark();
     ImGui::GetStyle().FontScaleMain = g.font_scale;
 
+    {
+        char font[MAX_PATH] = {};
+        if (GetWindowsDirectoryA(font, MAX_PATH)) {
+            strcat_s(font, "\\Fonts\\segoeui.ttf");
+            if (GetFileAttributesA(font) != INVALID_FILE_ATTRIBUTES &&
+                io.Fonts->AddFontFromFileTTF(font, 18.0f))
+                g.cyrillic = true;
+        }
+    }
+
     if (!ImGui_ImplWin32_Init(g.hwnd)) {
         log_line("UI", "!! ImGui_ImplWin32_Init failed -- the panel is OFF");
         ImGui::DestroyContext();
@@ -725,7 +885,7 @@ void ui_shutdown() {
 }
 
 bool ui_captures_input() {
-    if (!g.ready || !g.visible) return false;
+    if (!g.ready) return false;
     const ImGuiIO& io = ImGui::GetIO();
     return io.WantCaptureMouse || io.WantCaptureKeyboard;
 }
@@ -746,8 +906,6 @@ void ui_on_swap(void* window) {
         }
     }
 
-    if (!g.visible) return;
-
     if (!g.ready) {
         if (!bring_up()) { g.failed = true; return; }
         g.ready = true;
@@ -761,8 +919,13 @@ void ui_on_swap(void* window) {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    draw_session();
-    draw_log();
+    ImGui::GetIO().MouseDrawCursor = ImGui::GetIO().WantCaptureMouse;
+
+    draw_multiplayer();
+    if (g.visible) {
+        draw_session();
+        draw_log();
+    }
 
     ImGui::Render();
     // RenderDrawData backs up and restores the GL state it touches, which is

@@ -35,6 +35,9 @@
 #include <cstdarg>
 
 namespace mgmp {
+
+void facing_commit_all();
+
 namespace {
 
 // This counts ENTRIES IN THE BATTLE'S CHARACTER LIST, which is mostly scenery.
@@ -273,6 +276,7 @@ struct State {
     uint32_t agreements      = 0;
 
     uint32_t humans          = 0;   // cats a human brain drives, either peer's
+    bool     said_run_split  = false;
     bool     state_hash_on   = false;
     bool     control_checked = false;
     // One slot per peer id, which is why ids are allocated lowest-free and stay
@@ -755,6 +759,7 @@ void snapshot_cats(void* turn_control) {
     }
     g.snapped      = true;
     g.snapped_list = list;
+    facing_commit_all();
 
     // A new roster invalidates the table the last hash was taken over, and
     // re-arms the one-shot desync dump for this battle.
@@ -817,12 +822,53 @@ void snapshot_cats(void* turn_control) {
         const SplitRange range = split_for(g.humans, P, pos);
         const uint32_t   mine  = range.count;
 
-        uint32_t seen = 0;
-        for (uint32_t i = 0; i < g.cat_count; ++i) {
-            if (!g.human_cat[i]) continue;
-            g.local_cat[i] = split_owns(range, seen);
-            ++seen;
+        uint32_t rank[kMaxCats];
+        bool     by_run = false;
+        {
+            const void* run[64] = {};
+            const uint32_t rn = catsync_run_cat_ptrs(run, 64);
+            constexpr uint32_t kScan = 0xF00;
+            for (uint32_t off = 0; rn && g.humans && off + 8 <= kScan && !by_run; off += 8) {
+                bool ok = true;
+                bool used[64] = {};
+                for (uint32_t i = 0; i < g.cat_count && ok; ++i) {
+                    if (!g.human_cat[i]) continue;
+                    const void* p = nullptr;
+                    ok = mem_read((const uint8_t*)g.cats[i] + off, &p, sizeof(p)) && p;
+                    uint32_t r = rn;
+                    for (uint32_t k = 0; ok && k < rn; ++k) if (run[k] == p) { r = k; break; }
+                    ok = ok && r < rn && !used[r];
+                    if (ok) { used[r] = true; rank[i] = r; }
+                }
+                if (ok) {
+                    by_run = true;
+                    if (!g.said_run_split) {
+                        g.said_run_split = true;
+                        log_line("LOCKSTEP", "cats are split by their place in the run "
+                                             "(Character+0x%X -> CatData), so each "
+                                             "player keeps the same cats every battle",
+                                 off);
+                    }
+                }
+            }
+            if (!by_run && g.humans)
+                log_line_lvl(LogLevel::Warn, "LOCKSTEP",
+                             "!! could not link this battle's cats to the run's cat "
+                             "list -- splitting by battle order, so the cats each "
+                             "player gets may differ from the last battle");
         }
+
+        uint32_t order[kMaxCats];
+        uint32_t no = 0;
+        for (uint32_t i = 0; i < g.cat_count; ++i) if (g.human_cat[i]) order[no++] = i;
+        if (by_run) {
+            for (uint32_t a = 1; a < no; ++a)
+                for (uint32_t b = a; b > 0 && rank[order[b]] < rank[order[b - 1]]; --b) {
+                    const uint32_t t = order[b]; order[b] = order[b - 1]; order[b - 1] = t;
+                }
+        }
+        for (uint32_t k = 0; k < no; ++k)
+            g.local_cat[order[k]] = split_owns(range, k);
 
         if (mine == 0 && g.humans)
             log_line("LOCKSTEP", "!! %u human cat(s) over %u player(s) leaves this "
@@ -1873,6 +1919,10 @@ void lockstep_shutdown() {
     if (g.agreements)
         log_line_lvl(s.desyncs ? LogLevel::Error : LogLevel::Trace, "LOCKSTEP",
                  "   %u turn hash(es) compared and agreed", g.agreements);
+    log_line_lvl(LogLevel::Trace, "LOCKSTEP",
+             "   facing: %u correction(s) from actions-only facing, %u by the "
+             "aim-preview freeze", lockstep_facing_corrections(),
+             lockstep_preview_facing_count());
     g.active = false;
     if (g.cs_ready) { DeleteCriticalSection(&g.cs); g.cs_ready = false; }
 }
@@ -1971,6 +2021,69 @@ void lockstep_preview_facing_end() {
 }
 
 uint32_t lockstep_preview_facing_count() { return g_pf.restored; }
+
+struct CommittedFacing {
+    int32_t  x[kMaxCats]{}, y[kMaxCats]{};
+    bool     have[kMaxCats]{};
+    uint32_t restored  = 0;
+    uint32_t restores_total = 0;
+    bool     said      = false;
+};
+CommittedFacing g_cf;
+
+void facing_commit_all() {
+    for (uint32_t i = 0; i < kMaxCats; ++i) g_cf.have[i] = false;
+    if (!g.snapped) return;
+    uint32_t live = 0, appeared = 0;
+    bool in[kMaxCats];
+    if (!snapshot_membership(g.snapped_list, live, in, appeared)) return;
+    for (uint32_t i = 0; i < g.cat_count; ++i) {
+        if (!in[i]) continue;
+        const uint8_t* ch = (const uint8_t*)g.cats[i];
+        if (mem_read(ch + kChar_Facing,     &g_cf.x[i], sizeof(int32_t)) &&
+            mem_read(ch + kChar_Facing + 4, &g_cf.y[i], sizeof(int32_t)))
+            g_cf.have[i] = true;
+    }
+}
+
+void facing_enforce_all(const char* where) {
+    if (!g.snapped || g.halted) return;
+    uint32_t live = 0, appeared = 0;
+    bool in[kMaxCats];
+    if (!snapshot_membership(g.snapped_list, live, in, appeared)) return;
+    for (uint32_t i = 0; i < g.cat_count; ++i) {
+        if (!in[i] || !g_cf.have[i]) continue;
+        uint8_t* ch = (uint8_t*)g.cats[i];
+        int32_t fx = 0, fy = 0;
+        if (!mem_read(ch + kChar_Facing,     &fx, sizeof(fx))) continue;
+        if (!mem_read(ch + kChar_Facing + 4, &fy, sizeof(fy))) continue;
+        if (fx == g_cf.x[i] && fy == g_cf.y[i]) continue;
+        if (!mem_write(ch + kChar_Facing,     &g_cf.x[i], sizeof(int32_t))) continue;
+        if (!mem_write(ch + kChar_Facing + 4, &g_cf.y[i], sizeof(int32_t))) continue;
+        ++g_cf.restored;
+        ++g_cf.restores_total;
+        if (!g_cf.said) {
+            g_cf.said = true;
+            log_line("LOCKSTEP", "cat %u was turned outside an action ((%d,%d), the "
+                                 "actions left it at (%d,%d)) -- put back %s. Facing "
+                                 "decides backstabs, so it comes from actions only; "
+                                 "further corrections are counted, not logged",
+                     i, fx, fy, g_cf.x[i], g_cf.y[i], where);
+        }
+    }
+}
+
+void lockstep_facing_after_apply() {
+    if (!lockstep_active()) return;
+    facing_commit_all();
+}
+
+void lockstep_facing_before(const char* where) {
+    if (!lockstep_active()) return;
+    facing_enforce_all(where);
+}
+
+uint32_t lockstep_facing_corrections() { return g_cf.restores_total; }
 
 // --- the state fence --------------------------------------------------------
 //

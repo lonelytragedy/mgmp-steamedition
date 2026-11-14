@@ -68,6 +68,8 @@ struct State {
 
 State g;
 
+constexpr uintptr_t kCat_NextFightStatuses = 0x7B8;
+
 // --- SEH shims --------------------------------------------------------------
 //
 // Every one of these calls into the game with a pointer whose meaning is
@@ -268,6 +270,22 @@ void catsync_shutdown() {
 // not per-peer, so without this the next node's publish tells a freshly
 // arrived peer about only the cats that happened to change since the last
 // node -- and it has none of the others.
+uint32_t catsync_run_cat_ptrs(const void** out, uint32_t cap) {
+    if (!g.by_id) return 0;
+    RunCats rc{};
+    if (!run_cats(rc)) return 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < rc.count && n < cap; ++i) {
+        uint64_t id = 0;
+        void* cat = nullptr;
+        if (!mem_read(rc.ids + i, &id, sizeof(id)) ||
+            !safe_by_id((void*)rc.registry, id, &cat))
+            cat = nullptr;
+        out[n++] = cat;
+    }
+    return n;
+}
+
 void catsync_forget() {
     ensure_state();
     if (!g.on || g.is_client) return;
@@ -349,6 +367,22 @@ static void apply_now(const CatDataMsg& m, const char* when) {
         return;
     }
 
+    uint8_t* mine = nullptr;
+    const uint32_t mine_n = serialize_cat(cat, &mine);
+    const bool same = mine_n == m.size && mine && memcmp(mine, m.data, m.size) == 0;
+    free(mine);
+    if (same) {
+        ++g.skipped;
+        log_line_lvl(LogLevel::Trace, "CATSYNC",
+                     "<- cat %016llx is already identical here -- not re-applied (%s)",
+                     (unsigned long long)m.id, when);
+        return;
+    }
+    {
+        const void* nul[3] = { nullptr, nullptr, nullptr };
+        mem_write((uint8_t*)cat + kCat_NextFightStatuses, nul, sizeof(nul));
+    }
+
     uint8_t bs[kByteStreamSize];
     if (!bs_construct(bs)) return;
 
@@ -365,6 +399,16 @@ static void apply_now(const CatDataMsg& m, const char* when) {
         ++g.applied;
         log_line("CATSYNC", "<- applied cat %016llx (%u bytes, %s)",
                  (unsigned long long)m.id, m.size, when);
+        uint8_t* after = nullptr;
+        const uint32_t after_n = serialize_cat(cat, &after);
+        if (!(after_n == m.size && after && memcmp(after, m.data, m.size) == 0))
+            log_line_lvl(LogLevel::Error, "CATSYNC",
+                         "!! cat %016llx does not match the host's bytes after being "
+                         "applied (%u here vs %u sent) -- some other CatData field "
+                         "appends instead of replacing on a live cat; this cat will "
+                         "differ from the host's", (unsigned long long)m.id,
+                         after_n, m.size);
+        free(after);
     } else {
         log_line("CATSYNC", "!! deserializing cat %016llx faulted -- this peer's "
                             "copy of that cat is now UNTRUSTWORTHY",

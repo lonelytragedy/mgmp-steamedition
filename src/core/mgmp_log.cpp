@@ -126,28 +126,20 @@ void log_init(const wchar_t* path, bool console) {
         g_console = true;
     }
     if (path && !g_file) {
-        // Stamp the name with local time: <stem>_YYYYMMDD-HHMMSS<ext>.
         //
-        // Every previous run overwrote the last one, which is fine while a
-        // session is one run but actively harmful once two peers are launched
-        // repeatedly -- the run that explained a desync is gone the moment you
-        // relaunch to look again. Keeping them all is cheap; losing one is not.
         wchar_t stamped[MAX_PATH];
-        SYSTEMTIME t{};
-        GetLocalTime(&t);
+        wcsncpy_s(stamped, path, _TRUNCATE);
 
+        wchar_t prev[MAX_PATH];
         const wchar_t* dot   = wcsrchr(path, L'.');
         const wchar_t* slash = wcsrchr(path, L'\\');
         if (dot && (!slash || dot > slash)) {
             int stem = (int)(dot - path);
-            _snwprintf_s(stamped, _TRUNCATE, L"%.*s_%04d%02d%02d-%02d%02d%02d%s",
-                         stem, path, t.wYear, t.wMonth, t.wDay,
-                         t.wHour, t.wMinute, t.wSecond, dot);
+            _snwprintf_s(prev, _TRUNCATE, L"%.*s.prev%s", stem, path, dot);
         } else {
-            _snwprintf_s(stamped, _TRUNCATE, L"%s_%04d%02d%02d-%02d%02d%02d",
-                         path, t.wYear, t.wMonth, t.wDay,
-                         t.wHour, t.wMinute, t.wSecond);
+            _snwprintf_s(prev, _TRUNCATE, L"%s.prev", path);
         }
+        MoveFileExW(path, prev, MOVEFILE_REPLACE_EXISTING);
 
         // _SH_DENYWR, not fopen's exclusive default: the whole point of this
         // file is that another process tails it while the game is running.

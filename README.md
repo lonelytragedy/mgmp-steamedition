@@ -67,6 +67,25 @@ build tools) and **CMake 3.21+**.
 
 ## Getting it running
 
+### The easy way: Steam, one file
+
+The build also produces `version.dll`, the same mod packaged as a drop-in:
+
+1. Copy `version.dll` into the game folder, next to `Mewgenics.exe`
+   (Steam -> Mewgenics -> Manage -> Browse local files). Both players do this.
+2. Start the game normally from Steam. No loader, no `mgmp.json`, no ports.
+3. A **Multiplayer** button sits in the top-right corner. The host presses
+   **Host over Steam**, then **Invite a friend** (the Steam overlay opens).
+4. The friend accepts the invite in Steam, or opens the same window and presses
+   **Join** next to the host's name. They wait at the main menu; the host is in
+   Adventure mode, as with the TCP route.
+
+Traffic goes over Steam's P2P networking (`ISteamNetworkingMessages`, relayed by
+Valve when a direct path fails) through the game's own `steam_api64.dll`; the
+lobby is friends-only and decides who is in the session. F1 still opens the debug
+panel. To uninstall, delete `version.dll`. Do not also run `mgmp_loader.exe`: the
+second copy notices the first and stands down.
+
 ### Prebuilt
 
 The easiest way. Download the archive from the [Releases](https://github.com/SanTertrust/mgmp/releases).
@@ -207,9 +226,11 @@ If that happens, the log files are the interesting part — see below.
 
 ### Logs
 
-Every session writes a timestamped log next to the loader
-(`mgmp_host_20260826-143000.log` and similar). If you want to report a problem,
-that file from *both* players is what makes it diagnosable. A single side's log
+The mod writes `mgmp_trace.log` next to the DLL (the game folder for the
+drop-in `version.dll`), overwritten on every launch; the launch before it is kept
+as `mgmp_trace.prev.log`. If you want to report a problem, those files from
+*both* players are what make it diagnosable -- send the `.prev` one too if the
+game has been restarted since. A single side's log
 can usually only show that something went wrong, not what.
 
 ---

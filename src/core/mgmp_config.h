@@ -85,7 +85,11 @@ struct Config {
     // --- the debug panel -----------------------------------------------------
 
     bool     ui         = true;    // ui.enabled
+#ifdef MGMP_PROXY
+    bool     ui_visible = false;
+#else
     bool     ui_visible = true;    // whether it starts open; ui.key toggles
+#endif
     uint32_t ui_key     = 0x70;    // ui.key, "F1" or a raw VK code
 
     // --- derived, not parsed -------------------------------------------------

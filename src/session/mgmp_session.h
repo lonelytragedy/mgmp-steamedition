@@ -67,6 +67,10 @@ void session_request_host(uint16_t port);
 void session_request_join(const char* addr, uint16_t port);
 void session_request_disconnect();
 
+void session_request_host_steam();
+void session_request_join_steam(uint64_t lobby);
+bool session_is_steam();
+
 // Whether a request is waiting to be applied. The panel greys its buttons on
 // it, so a second click during the one-frame gap cannot queue a second action.
 bool session_request_pending();

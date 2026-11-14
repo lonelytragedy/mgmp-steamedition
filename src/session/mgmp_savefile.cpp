@@ -9,6 +9,8 @@
 #include "mgmp_addresses.h"
 #include "mgmp_resolve.h"
 #include "mgmp_follow.h"   // follow_on_map
+#include "mgmp_steam.h"
+#include "mgmp_leave.h"
 // A slot click starts a run, which makes the three per-run dedupe caches stale.
 // See the block in savefile_on_slot_click.
 #include "mgmp_catsync.h"
@@ -115,6 +117,19 @@ bool resolve_save_dir(wchar_t* out, size_t out_len) {
     wchar_t root[MAX_PATH];
     _snwprintf_s(root, _TRUNCATE, L"%s\\Glaiel Games\\Mewgenics", appdata);
 
+    if (const uint64_t me = steam_self()) {
+        wchar_t mine[MAX_PATH];
+        _snwprintf_s(mine, _TRUNCATE, L"%s\\%llu\\saves", root, (unsigned long long)me);
+        DWORD attr = GetFileAttributesW(mine);
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+            wcscpy_s(out, out_len, mine);
+            return true;
+        }
+        log_line("SAVEFILE", "!! no save directory for the logged-in Steam account "
+                             "%llu (%ls) -- falling back to guessing",
+                 (unsigned long long)me, mine);
+    }
+
     wchar_t glob[MAX_PATH];
     _snwprintf_s(glob, _TRUNCATE, L"%s\\*", root);
 
@@ -150,8 +165,10 @@ bool resolve_save_dir(wchar_t* out, size_t out_len) {
         return false;
     }
     if (found > 1)
-        log_line("SAVEFILE", "%d account directories under %ls -- using the most "
-                             "recently written one", found, root);
+        log_line_lvl(LogLevel::Warn, "SAVEFILE",
+                     "%d account directories under %ls and Steam could not say which "
+                     "is ours -- GUESSING the most recently written one; if the host's "
+                     "save is reported missing, this guess is why", found, root);
     wcscpy_s(out, out_len, best);
     return true;
 }
@@ -260,6 +277,8 @@ struct State {
     uint32_t slot        = 0;
     char     name[64]    = {};
     uint64_t click_mtime = 0;     // the file's mtime when the host committed
+    int      last_problem = 0;
+    char     problem[400] = {};
     bool     published   = false;
     uint32_t publish_tries = 0;
     // sub_1403B9CE0(MewDirector*), resolved once and prologue-checked. Null
@@ -269,6 +288,8 @@ struct State {
     const void** director_slot = nullptr;
     bool     said_no_flush = false;
     bool     said_mid_node = false;
+    uint32_t departures_seen = 0;
+    uint32_t house_waits   = 0;
 
     // --- client ---
     uint8_t* blob      = nullptr;
@@ -484,7 +505,23 @@ bool publish(uint8_t to, bool fresh) {
     uint32_t size = 0;
     uint64_t mtime = 0;
     uint8_t* data = read_whole_file(path, size, mtime);
-    if (!data) return false;
+    if (!data) {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) {
+            g.last_problem = 1;
+            _snprintf_s(g.problem, sizeof(g.problem), _TRUNCATE,
+                        "'%s' is not on disk yet (looked in %ls)", g.name, g.dir);
+        } else {
+            const uint64_t sz = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+            g.last_problem = 2;
+            _snprintf_s(g.problem, sizeof(g.problem), _TRUNCATE,
+                        sz > kMaxSaveBytes
+                            ? "!! '%s' is %llu bytes, over the %u-byte cap -- it cannot be sent"
+                            : "!! '%s' exists (%llu bytes, cap %u) but could not be read",
+                        g.name, (unsigned long long)sz, kMaxSaveBytes);
+        }
+        return false;
+    }
 
     SaveFileMsg m{};
     m.slot  = g.slot;
@@ -674,8 +711,20 @@ void savefile_pump() {
     if (g.play_cooldown) --g.play_cooldown;
 
     if (!g.on || g.is_client) return;
-    if (g.published) return;
     if (!net_active()) return;
+
+    const bool in_run = leave_in_run() && follow_on_map();
+    const uint32_t departures = leave_departures();
+    if (departures != g.departures_seen) {
+        g.departures_seen = departures;
+        if (g.published) {
+            g.published     = false;
+            g.publish_tries = 0;
+            log_line("SAVEFILE", "the host left the run -- the next run it sets out "
+                                 "on will be sent to the client automatically");
+        }
+    }
+    if (g.published) return;
 
     // THE SILENT STALL. g.have_slot is set by savefile_on_slot_click and by
     // nothing else, so a host that never passed through the save-selection
@@ -699,6 +748,15 @@ void savefile_pump() {
         return;
     }
 
+    if (!in_run) {
+        if (g.house_waits++ % 1800 == 0)
+            log_line("SAVEFILE", "the host is not in a run yet (house, menu or a "
+                                 "screen between) -- '%s' will be sent to the "
+                                 "client once the host is out on the map", g.name);
+        return;
+    }
+    g.house_waits = 0;
+
     // Retried rather than attempted once, because the file may not exist yet:
     // starting a NEW game means the click names a slot the game has not written
     // to disk. Once a second is often enough for a transfer that happens once.
@@ -710,10 +768,21 @@ void savefile_pump() {
         g.published = true;
         return;
     }
-    if (g.publish_tries == 1)
-        log_line("SAVEFILE", "'%s' is not on disk yet -- will keep trying "
-                             "(a new game has no save file until the game writes one)",
-                 g.name);
+    if (g.publish_tries == 1 || g.publish_tries % 600 == 1) {
+        if (!g.have_dir)
+            log_line_lvl(LogLevel::Error, "SAVEFILE",
+                         "!! no save directory found -- nothing can be published");
+        else if (g.last_problem == 1)
+            log_line("SAVEFILE", "%s -- will keep trying (a new game has no save "
+                                 "file until the game writes one)", g.problem);
+        else if (g.problem[0])
+            log_line_lvl(LogLevel::Error, "SAVEFILE", "%s", g.problem);
+        else
+            log_line_lvl(LogLevel::Error, "SAVEFILE",
+                         "!! '%s' could not be sent -- see the NET lines above", g.name);
+    }
+    g.last_problem = 0;
+    g.problem[0]   = 0;
 }
 
 bool savefile_on_slot_click(void* ss, int slot) {
@@ -857,6 +926,10 @@ void savefile_on_message(const SaveFileMsg& m) {
                      "from the save-selection screen -- quit to the main menu and "
                      "the host's new run will load on its own");
     }
+
+    if (m.fresh && (adventure_is_loaded_impl() || leave_in_house()))
+        leave_request_quit("the host has set out on a new run -- this peer must "
+                           "go through the main menu to load it");
 
     if (g.blob) free(g.blob);
     g.blob = (uint8_t*)malloc(m.size);

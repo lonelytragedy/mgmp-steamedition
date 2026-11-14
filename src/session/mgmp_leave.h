@@ -111,5 +111,9 @@ void leave_status(char* out, size_t out_size);
 // because it answers a question several modules currently answer by proxy, and
 // because the debug panel should be able to show it.
 bool leave_in_run();
+bool leave_in_house();
+void leave_request_quit(const char* why);
+bool leave_quit_pending();
+uint32_t leave_departures();
 
 } // namespace mgmp

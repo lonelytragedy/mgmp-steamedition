@@ -83,6 +83,8 @@ void catsync_publish(const char* why);
 // push. For a reconnecting peer -- see the comment on the definition.
 void catsync_forget();
 
+uint32_t catsync_run_cat_ptrs(const void** out, uint32_t cap);
+
 // CLIENT: resolve m.id in this peer's run and deserialize over it.
 //
 // A cat that arrives while this peer is in a battle is HELD, not applied and

@@ -65,3 +65,5 @@ desktop.ini
 .DS_Store
 
 !third_party/**
+
+/dist/

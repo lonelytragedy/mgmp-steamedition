@@ -303,6 +303,8 @@ bool follow_on_enter_node(void* map_screen, void* node, bool* sent) {
     // MapScreen::update -- so sending in this order is what guarantees the
     // battle is built from the host's cats rather than from the client's stale
     // ones. Reversing these two lines reintroduces the bug this closes.
+    catsync_forget();
+    invsync_forget();
     catsync_publish("entering a node");
     // ...and the other half of the same equip. Order between these two does not
     // matter the way it does against ENTERNODE -- an equip has already moved

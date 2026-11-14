@@ -4,6 +4,7 @@
 #include "mgmp_overlay.h"
 #include "mgmp_session.h"
 #include "mgmp_net.h"
+#include "mgmp_steam.h"
 #include "mgmp_catsync.h"
 #include "mgmp_invsync.h"
 #include "mgmp_aim.h"
@@ -33,7 +34,7 @@ enum class Phase { Off, Waiting, HelloSent, Ready, Refused };
 // A runtime host/join/disconnect asked for by the debug panel, applied at the
 // top of session_update. See the note on session_request_host in the header for
 // why it cannot be applied where it is asked for.
-enum class Request : uint8_t { None, Host, Join, Disconnect };
+enum class Request : uint8_t { None, Host, Join, Disconnect, HostSteam, JoinSteam };
 
 struct State {
     Phase    phase = Phase::Off;
@@ -48,7 +49,10 @@ struct State {
     Request  request = Request::None;
     char     req_addr[64] = {};
     uint16_t req_port = 0;
+    uint64_t req_lobby = 0;
     char     last_action[128] = {};
+
+    bool     steam = false;
 };
 
 State g;
@@ -330,7 +334,45 @@ void note_action(const char* fmt, ...) {
 // Open a socket in one role and arm the handshake. The one path into a live
 // session, whether the ini asked for it at launch or somebody pressed a button
 // forty minutes in -- so a runtime connect cannot drift from the launch one.
+void prepare(bool host);
+
 bool begin(bool host, const char* addr, uint16_t port) {
+    prepare(host);
+
+    if (!(host ? net_host(port) : net_join(addr, port))) {
+        set_status("failed: %s", net_error());
+        g.phase = Phase::Off;
+        g.started = false;
+        return false;
+    }
+
+    g.phase = Phase::Waiting;
+    if (host) set_status("hosting on port %u", (unsigned)port);
+    else      set_status("joining %s:%u", addr, (unsigned)port);
+    return true;
+}
+
+bool begin_steam(bool host, uint64_t lobby) {
+    prepare(host);
+    g.steam = true;
+
+    bool ok = host ? (net_host_steam() && steam_host_lobby())
+                   : steam_join_lobby(lobby);
+    if (!ok) {
+        set_status("failed: %s", net_error()[0] ? net_error() : steam_lobby_status());
+        if (host) net_shutdown();
+        steam_leave_lobby();
+        g.phase   = Phase::Off;
+        g.started = false;
+        g.steam   = false;
+        return false;
+    }
+    g.phase = Phase::Waiting;
+    set_status(host ? "hosting over Steam" : "joining over Steam");
+    return true;
+}
+
+void prepare(bool host) {
     g.started       = true;
     g.dropped_types = 0;   // a fresh session gets a fresh set of warnings
 
@@ -368,21 +410,6 @@ bool begin(bool host, const char* addr, uint16_t port) {
         log_line("SESSION", "data identity: gpak %016llx build %016llx",
                  (unsigned long long)g.gpak_hash, (unsigned long long)g.build_hash);
     }
-
-    if (!(host ? net_host(port) : net_join(addr, port))) {
-        set_status("failed: %s", net_error());
-        g.phase = Phase::Off;
-        // Left started = false so another attempt is possible. A failed dial is
-        // the single most likely thing to want to retry, and the reconnect
-        // testing this exists for consists mostly of retrying.
-        g.started = false;
-        return false;
-    }
-
-    g.phase = Phase::Waiting;
-    if (host) set_status("hosting on port %u", (unsigned)port);
-    else      set_status("joining %s:%u", addr, (unsigned)port);
-    return true;
 }
 
 // Apply whatever the panel asked for, at the top of a frame rather than in the
@@ -406,6 +433,16 @@ void apply_request() {
     }
 
     if (req == Request::Disconnect) return;
+
+    if (req == Request::HostSteam || req == Request::JoinSteam) {
+        const bool host = (req == Request::HostSteam);
+        if (begin_steam(host, g.req_lobby))
+            note_action(host ? "hosting over Steam" : "joining a Steam lobby");
+        else
+            note_action("!! could not %s over Steam: %s", host ? "host" : "join",
+                        steam_lobby_status());
+        return;
+    }
 
     const bool host = (req == Request::Host);
     if (begin(host, g.req_addr, g.req_port)) {
@@ -449,6 +486,15 @@ void session_request_join(const char* addr, uint16_t port) {
 
 void session_request_disconnect() { g.request = Request::Disconnect; }
 
+void session_request_host_steam() { g.request = Request::HostSteam; }
+
+void session_request_join_steam(uint64_t lobby) {
+    g.request   = Request::JoinSteam;
+    g.req_lobby = lobby;
+}
+
+bool session_is_steam() { return g.steam; }
+
 bool        session_request_pending() { return g.request != Request::None; }
 const char* session_last_action()     { return g.last_action; }
 
@@ -467,6 +513,8 @@ void session_shutdown() {
     choice_shutdown();
     lockstep_shutdown();
     net_shutdown();
+    if (g.steam) steam_leave_lobby();
+    g.steam = false;
     g.phase = Phase::Off;
     g.started = false;
 }
@@ -475,7 +523,21 @@ void session_update() {
     // BEFORE the early return below, deliberately: a Host or Join pressed with
     // no session at all arrives with phase == Off, which is precisely the state
     // that return exists to skip.
+    steam_pump();
+    if (uint64_t lobby = steam_take_join_request()) {
+        log_line("SESSION", "joining lobby %llu from a Steam invite",
+                 (unsigned long long)lobby);
+        session_request_join_steam(lobby);
+    }
+
     apply_request();
+
+    if (g.steam && steam_lobby_state() == LobbyState::Failed) {
+        set_status("failed: %s", steam_lobby_status());
+        note_action("!! %s", steam_lobby_status());
+        session_shutdown();
+        return;
+    }
 
     if (g.phase == Phase::Off || g.phase == Phase::Refused) return;
 

@@ -160,6 +160,10 @@ void     lockstep_preview_facing_begin(void* brain);
 void     lockstep_preview_facing_end();
 uint32_t lockstep_preview_facing_count();
 
+void     lockstep_facing_after_apply();
+void     lockstep_facing_before(const char* where);
+uint32_t lockstep_facing_corrections();
+
 // --- the state fence -------------------------------------------------------
 //
 // Snapshot every snapped cat's simulation state, run something, then check that

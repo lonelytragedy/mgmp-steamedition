@@ -335,6 +335,8 @@ void leave_set_base(uintptr_t /*base*/) {
 // which is finer than the thing it describes changes.
 bool leave_in_run() { return g.where == Where::InRun; }
 
+uint32_t leave_departures() { return g.sent; }
+
 void leave_pump() {
     ensure_state();
 
@@ -378,7 +380,7 @@ void leave_pump() {
     //
     // Before the role split, because leave_request_local can arm a host and a
     // departure that completes has to be reported whoever asked for it.
-    if (g.pending && here == Where::OutOfRun) {
+    if (g.pending && here == Where::OutOfRun && _stricmp(g.where_name, "House") != 0) {
         g.pending = false;
         ++g.left;
         log_line("LEAVE", "out of the run and on '%s' -- if the host picks a save "
@@ -519,7 +521,7 @@ void leave_status(char* out, size_t out_size) {
                                : "  [pause menu NOT seen yet]");
 }
 
-void leave_request_local() {
+void leave_request_quit(const char* why) {
     ensure_state();
     g.pending      = true;
     g.presses      = 0;
@@ -530,11 +532,19 @@ void leave_request_local() {
     // depend on a session, so neither should the test of it. What it does need
     // is Button::Click, which is resolved in leave_set_base at load time.
     g.on = true;
-    log_line("LEAVE", "armed by hand from the panel%s -- open the pause menu and "
-                      "Quit To Menu will be pressed for you",
-             g.button_click ? "" : ", BUT Button::Click did not resolve, so "
-                                   "nothing can be pressed");
+    log_line_lvl(LogLevel::Warn, "LEAVE", "armed: %s%s -- open the pause menu (Esc) "
+                                          "and Quit To Menu will be pressed for you",
+             why, g.button_click ? "" : ", BUT Button::Click did not resolve, so "
+                                        "nothing can be pressed");
 }
+
+void leave_request_local() { leave_request_quit("by hand from the panel"); }
+
+bool leave_in_house() {
+    return g.where == Where::OutOfRun && _stricmp(g.where_name, "House") == 0;
+}
+
+bool leave_quit_pending() { return g.pending; }
 
 void leave_on_button_update(void* button) {
     // The cheap tests first, in this order deliberately: this runs for every

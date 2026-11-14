@@ -105,12 +105,13 @@ function Stop-Peers {
     else    { Write-Host 'no instances running' }
 }
 
-# Newest timestamped log for a peer. The plain mgmp_<peer>.log name is a
-# pre-timestamp leftover and is deliberately NOT matched -- reading a stale log
-# and believing it is this run's is the exact mistake the timestamps prevent.
+# This run's log for a peer: mgmp_<peer>.log (the previous run is rotated to
+# mgmp_<peer>.prev.log at startup). Older builds stamped every run as
+# mgmp_<peer>_YYYYMMDD-HHMMSS.log; those are still read if they are the newest
+# file, so a log from an old DLL is not silently skipped.
 function Get-PeerLog([string]$peer) {
     $dir = Join-Path $root $peers[$peer]
-    Get-ChildItem (Join-Path $dir "mgmp_${peer}_2*.log") -ErrorAction SilentlyContinue |
+    Get-ChildItem (Join-Path $dir "mgmp_${peer}.log"), (Join-Path $dir "mgmp_${peer}_2*.log") -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime | Select-Object -Last 1
 }
 

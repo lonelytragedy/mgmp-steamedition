@@ -331,7 +331,12 @@ void __fastcall h_ApplyAction(void* self, void* ta) {
     if (replay_active())   replay_on_applied(ta, current_actor(self));
     if (lockstep_active()) lockstep_on_applied(ta, current_actor(self));
 
+    static int depth = 0;
+    if (depth == 0) lockstep_facing_before("before an action");
+    ++depth;
     o_ApplyAction(self, ta);
+    --depth;
+    if (depth == 0) lockstep_facing_after_apply();
 }
 
 // The push side of the ring. Fires for every deferred reaction a passive or
@@ -593,6 +598,7 @@ void __fastcall h_ButtonUpdate(void* self) {
 // -- it exists in the signature so that rdx and the returned rax survive the
 // detour untouched.
 void* __fastcall h_UpdateDecision(void* self, void* out) {
+    lockstep_facing_before("before a decision");
     lockstep_preview_facing_begin(self);
     void* ret = o_UpdateDecision(self, out);
     lockstep_preview_facing_end();

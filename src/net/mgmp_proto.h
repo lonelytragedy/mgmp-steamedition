@@ -128,7 +128,7 @@ enum MsgType : uint8_t {
 // literal "SQLite format 3 ") and the campaign save measures about 45 KB. The
 // cap is generous but bounded: a garbled length must not make the receiver
 // allocate wildly, and there is no legitimate save anywhere near this size.
-constexpr uint32_t kMaxSaveBytes = 4u << 20;   // 4 MiB
+constexpr uint32_t kMaxSaveBytes = 7u << 20;
 
 // ---------------------------------------------------------------------------
 // Little-endian cursor writer/reader.

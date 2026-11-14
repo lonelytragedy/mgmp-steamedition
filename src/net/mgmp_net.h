@@ -82,6 +82,16 @@ bool net_host(uint16_t port);
 bool net_join(const char* addr, uint16_t port);
 void net_shutdown();
 
+enum class NetTransport { Tcp, Steam };
+NetTransport net_transport();
+
+bool net_host_steam();
+bool net_join_steam(uint64_t host_steam_id);
+
+void net_steam_peer_joined(uint64_t steam_id);
+void net_steam_peer_left(uint64_t steam_id);
+void net_steam_host_lost();
+
 NetState    net_state();
 NetRole     net_role();
 const char* net_error();          // "" unless state is Failed
